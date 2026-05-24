@@ -39,6 +39,7 @@ TOKENIZER_PATH = "./prototypical_bert_model/tokenizer.pth"
 # METADATA_PATH = "./prototypical_bert_model/metadata.json"  # deleted, label2id rebuilt from training data instead
 PROTOTYPES_PATH = "./prototypical_bert_model/prototypes.pt"
 CLINC_PATH = "../oos-eval/data/data_full.json"
+NOISY_PATH = "../noisy_test_set2.json"
 MAX_LENGTH = 64
 BATCH_SIZE = 128  # Increased for GPU efficiency
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -261,40 +262,13 @@ def main():
     # Load test data
     print("\nLoading CLINC test data...")
     # test_texts, test_labels, label2id = load_clinc_test_data(CLINC_PATH)  # old call, rebuilt label2id from test set
-    test_texts, test_labels = load_clinc_test_data(CLINC_PATH, label2id)
+    _, test_labels = load_clinc_test_data(CLINC_PATH, label2id)
 
-    # Generate noisy versions (same as Colab)
-    print("\nGenerating noisy test sets...")
-
-    print("  Creating casing noise...")
-    casing_texts = add_casing_noise(test_texts)
-    print("  Creating keyboard noise...")
-    keyboard_texts = add_keyboard_noise(test_texts)
-    print("  Creating spelling noise...")
-    spelling_texts = add_spelling_noise(test_texts)
-    print("  Creating synonym noise...")
-    synonym_texts = add_synonym_noise(test_texts)
-    print("  Creating abbreviation noise...")
-    abbreviation_texts = add_abbreviation_noise(test_texts)
-
-    noisy_variants = {
-        "original": test_texts,
-        "casing": casing_texts,
-        "keyboard": keyboard_texts,
-        "spelling": spelling_texts,
-        "synonyms": synonym_texts,
-        "abbreviations": abbreviation_texts,
-    }
-
-    print("Noisy variants created:")
-    for name, texts in noisy_variants.items():
-        print(f"  {name}: {len(texts)} examples")
-
-    # Show examples
-    print("\nExamples of noise:")
-    for name in ["casing", "keyboard", "spelling", "synonyms", "abbreviations"]:
-        noisy = noisy_variants[name]
-        print(f"  {name}: '{test_texts[0]}' → '{noisy[0]}'")
+    # Load pre-generated noisy test sets
+    print(f"\nLoading noisy test sets from {NOISY_PATH}...")
+    with open(NOISY_PATH) as f:
+        noisy_variants = json.load(f)
+    print(f"  Variants: {list(noisy_variants.keys())}")
 
     # Evaluate on all variants
     print("\n" + "="*70)

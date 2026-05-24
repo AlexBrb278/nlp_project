@@ -197,32 +197,22 @@ def build_prototypes(model, tokenizer, texts, labels, num_classes, device, batch
     dataset = IntentDataset(texts, labels, tokenizer, MAX_LENGTH)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    sums = torch.zeros((num_classes, model.hidden_dim), dtype=torch.float32)
-    counts = torch.zeros(num_classes, dtype=torch.long)
-
+    all_embs, all_labels = [], []
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            batch_labels = batch["label"].to(device)
+            emb = model(batch["input_ids"].to(device), batch["attention_mask"].to(device))
+            all_embs.append(emb.cpu())
+            all_labels.extend(batch["label"].tolist())
 
-            embeddings = model(input_ids, attention_mask)
-            for class_idx in range(num_classes):
-                mask = batch_labels == class_idx
-                if mask.any():
-                    class_embeddings = embeddings[mask]
-                    sums[class_idx] += class_embeddings.sum(dim=0).cpu()
-                    counts[class_idx] += mask.sum().cpu()
-
-    prototypes = torch.zeros((num_classes, model.hidden_dim), dtype=torch.float32)
-    for class_idx in range(num_classes):
-        if counts[class_idx] > 0:
-            prototypes[class_idx] = sums[class_idx] / counts[class_idx].float()
-        else:
-            prototypes[class_idx] = torch.randn(model.hidden_dim)
-
-    return prototypes
+    all_embs = torch.cat(all_embs)
+    labels_t = torch.tensor(all_labels)
+    protos = torch.zeros(num_classes, model.hidden_dim)
+    for c in range(num_classes):
+        mask = labels_t == c
+        if mask.sum() > 0:
+            protos[c] = all_embs[mask].mean(dim=0)
+    return protos
 
 
 # ============================================================================
