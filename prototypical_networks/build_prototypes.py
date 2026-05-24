@@ -228,8 +228,8 @@ def build_prototypes(model, tokenizer, texts, labels, num_classes, device, batch
 # ============================================================================
 # INFERENCE
 # ============================================================================
-def classify_text(model, tokenizer, prototypes, text, device):
-    """Returns (label_idx, embedding_numpy_array)."""
+def classify_text(model, tokenizer, prototypes, text, device, top_k=3):
+    """Returns (top_k_indices, top_k_distances, embedding_numpy_array)."""
     model.eval()
     encoding = tokenizer(
         text,
@@ -245,9 +245,9 @@ def classify_text(model, tokenizer, prototypes, text, device):
     with torch.no_grad():
         emb = model(input_ids, attention_mask)
         distances = torch.cdist(emb, prototypes.to(device))
-        pred = torch.argmin(distances, dim=1).item()
+        top_dists, top_idxs = torch.topk(distances[0], k=top_k, largest=False)
 
-    return pred, emb.cpu().numpy()
+    return top_idxs.cpu().tolist(), top_dists.cpu().tolist(), emb.cpu().numpy()
 
 
 # ============================================================================
@@ -272,9 +272,20 @@ def build_proto_points(coords_2d, id2label):
     return points
 
 
-def _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np):
+def _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np, top3=None):
     pred_domain = _LABEL_TO_DOMAIN.get(pred_label, "other")
     pred_color  = _LABEL_TO_COLOR.get(pred_label, "#aaaaaa")
+
+    top3_data = []
+    if top3:
+        for rank, (lbl, dist) in enumerate(top3, 1):
+            top3_data.append({
+                "rank":   rank,
+                "label":  lbl,
+                "domain": _LABEL_TO_DOMAIN.get(lbl, "other"),
+                "color":  _LABEL_TO_COLOR.get(lbl, "#aaaaaa"),
+                "dist":   round(dist, 4),
+            })
 
     data = {
         "protos": proto_points,
@@ -289,6 +300,7 @@ def _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np):
             "first8": [round(float(v), 4) for v in emb_np[0, :8]],
             "px":     round(float(query_xy[0]), 4),
             "py":     round(float(query_xy[1]), 4),
+            "top3":   top3_data,
         },
         "domainColors": DOMAIN_COLORS,
     }
@@ -316,6 +328,13 @@ def _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np):
   #info .q-domain { font-size:0.78rem; color:#778; }
   #info .q-emb { font-size:0.75rem; color:#667; line-height:1.7; border-left:1px solid #1e2044; padding-left:18px; }
   #info .q-emb b { color:#99b; font-weight:600; }
+  #info .q-top3 { font-size:0.78rem; color:#99b; border-left:1px solid #1e2044; padding-left:18px; }
+  #info .q-top3 b { color:#ccd; font-weight:600; }
+  .top3-row { display:flex; align-items:center; gap:8px; padding:2px 0; }
+  .top3-rank { color:#556; font-size:0.72rem; width:16px; }
+  .top3-dot  { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+  .top3-label { font-weight:600; }
+  .top3-dist  { color:#556; font-size:0.72rem; }
   .emb-bar-wrap { display:flex; gap:3px; align-items:flex-end; height:28px; margin-top:4px; }
   .emb-bar { width:14px; border-radius:2px 2px 0 0; position:relative; }
   .emb-bar-neg { border-radius:0 0 2px 2px; }
@@ -347,6 +366,10 @@ def _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np):
     <div class="q-text">Query: <span id="q-text-val"></span></div>
     <div class="q-pred" id="q-pred-val"></div>
     <div class="q-domain" id="q-domain-val"></div>
+  </div>
+  <div class="q-top3">
+    <b>Top 3 closest intents</b>
+    <div id="q-top3-rows"></div>
   </div>
   <div class="q-emb">
     <div><b>Embedding</b> &nbsp;768-dim &nbsp;|&nbsp; norm = <span id="q-norm"></span></div>
@@ -403,6 +426,21 @@ document.getElementById('q-norm').textContent   = q.norm;
 document.getElementById('q-first8').textContent = '[' + q.first8.join(', ') + ']';
 document.getElementById('q-px').textContent     = q.px;
 document.getElementById('q-py').textContent     = q.py;
+
+// ── Populate top-3 list ──────────────────────────────────────────────────────
+(function buildTop3() {
+  const wrap = document.getElementById('q-top3-rows');
+  (q.top3 || []).forEach(function(item) {
+    const row = document.createElement('div');
+    row.className = 'top3-row';
+    row.innerHTML =
+      '<span class="top3-rank">#' + item.rank + '</span>' +
+      '<span class="top3-dot" style="background:' + item.color + '"></span>' +
+      '<span class="top3-label" style="color:' + item.color + '">' + item.label.replace(/_/g, ' ') + '</span>' +
+      '<span class="top3-dist">d=' + item.dist + '</span>';
+    wrap.appendChild(row);
+  });
+})();
 
 // mini bar chart for the first 8 dims
 (function buildBars() {
@@ -574,8 +612,8 @@ canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
     )
 
 
-def open_query_viz(proto_points, query_xy, query_text, pred_label, emb_np):
-    html = _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np)
+def open_query_viz(proto_points, query_xy, query_text, pred_label, emb_np, top3=None):
+    html = _make_query_html(proto_points, query_xy, query_text, pred_label, emb_np, top3=top3)
     path = Path(QUERY_VIZ_PATH)
     path.write_text(html, encoding="utf-8")
     # Under WSL the Linux webbrowser module has no registered browser.
@@ -678,21 +716,26 @@ def main():
     if args.sentence or args.interactive:
         protos_np = prototypes.cpu().numpy()
 
-        def run_viz(text, label_idx, emb_np):
+        def run_viz(text, top_idxs, top_dists, emb_np):
+            label_idx  = top_idxs[0]
             pred_label = id2label[label_idx]
-            norm = float(np.linalg.norm(emb_np))
-            print(f"Predicted intent: {pred_label} ({label_idx})")
-            print(f"Embedding:        768-dim vector  |  norm={norm:.4f}  |  first 8 values: [{', '.join(f'{v:.4f}' for v in emb_np[0, :8])}]")
+            # norm       = float(np.linalg.norm(emb_np))
+            top3       = [(id2label[i], d) for i, d in zip(top_idxs, top_dists)]
+            print(f"Top 3 closest intents:")
+            for rank, (lbl, dist) in enumerate(top3, 1):
+                marker = " <-- predicted" if rank == 1 else ""
+                print(f"  #{rank}  {lbl:<30}  distance={dist:.4f}{marker}")
+            # print(f"Embedding:        768-dim vector  |  norm={norm:.4f}  |  first 8 values: [{', '.join(f'{v:.4f}' for v in emb_np[0, :8])}]")
             print("Running t-SNE on prototypes + query...")
             proto_coords_2d, query_xy = project_with_tsne(protos_np, emb_np)
-            print(f"2D projection:    x={query_xy[0]:.4f}  y={query_xy[1]:.4f}")
+            # print(f"2D projection:    x={query_xy[0]:.4f}  y={query_xy[1]:.4f}")
             proto_points = build_proto_points(proto_coords_2d, id2label)
-            open_query_viz(proto_points, query_xy, text, pred_label, emb_np)
+            open_query_viz(proto_points, query_xy, text, pred_label, emb_np, top3=top3)
             print(f"Link: {Path(QUERY_VIZ_PATH).resolve().as_uri()}")
 
         if args.sentence:
-            label_idx, emb_np = classify_text(model, tokenizer, prototypes, args.sentence, DEVICE)
-            run_viz(args.sentence, label_idx, emb_np)
+            top_idxs, top_dists, emb_np = classify_text(model, tokenizer, prototypes, args.sentence, DEVICE)
+            run_viz(args.sentence, top_idxs, top_dists, emb_np)
             return
 
         print("\nEntering interactive mode. Type a sentence and press Enter. Empty line to quit.")
@@ -700,8 +743,8 @@ def main():
             text = input("> ")
             if not text.strip():
                 break
-            label_idx, emb_np = classify_text(model, tokenizer, prototypes, text, DEVICE)
-            run_viz(text, label_idx, emb_np)
+            top_idxs, top_dists, emb_np = classify_text(model, tokenizer, prototypes, text, DEVICE)
+            run_viz(text, top_idxs, top_dists, emb_np)
 
 
 if __name__ == "__main__":

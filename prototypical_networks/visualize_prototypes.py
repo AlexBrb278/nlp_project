@@ -15,16 +15,12 @@ import numpy as np
 from pathlib import Path
 from sklearn.manifold import TSNE
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PATHS
-# ─────────────────────────────────────────────────────────────────────────────
+
 PROTOTYPES_PATH = "./prototypical_bert_model/prototypes.pt"
 METADATA_PATH   = "./prototypical_bert_model/metadata.json"
 OUTPUT_HTML     = "./prototypical_bert_model/prototype_visualization.html"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLINC DOMAIN GROUPINGS  (all 150 intents, each assigned to exactly one domain)
-# ─────────────────────────────────────────────────────────────────────────────
+
 DOMAIN_INTENTS = {
     "auto & commute": [
         "directions", "distance", "gas", "gas_type", "how_busy",
@@ -109,9 +105,7 @@ DOMAIN_COLORS = {
     "entertainment":    "#d37295",
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTML TEMPLATE  (uses __POINTS__, __COLORS__, __TITLE__ as substitution tokens)
-# ─────────────────────────────────────────────────────────────────────────────
+
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -354,9 +348,6 @@ canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 """
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_label_domain_map():
     m = {}

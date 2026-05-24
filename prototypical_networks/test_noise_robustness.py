@@ -34,12 +34,10 @@ from torch.serialization import safe_globals
 import tokenizers
 import transformers.models.bert.tokenization_bert
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
 MODEL_PATH = "./prototypical_bert_model/model.pth"
 TOKENIZER_PATH = "./prototypical_bert_model/tokenizer.pth"
-METADATA_PATH = "./prototypical_bert_model/metadata.json"
+# METADATA_PATH = "./prototypical_bert_model/metadata.json"  # deleted, label2id rebuilt from training data instead
+PROTOTYPES_PATH = "./prototypical_bert_model/prototypes.pt"
 CLINC_PATH = "../oos-eval/data/data_full.json"
 MAX_LENGTH = 64
 BATCH_SIZE = 128  # Increased for GPU efficiency
@@ -48,9 +46,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 
-# ============================================================================
-# MODEL LOADING
-# ============================================================================
 class PrototypicalBertNetwork(torch.nn.Module):
     """Same model architecture as training script"""
     def __init__(self, bert_model_name="bert-base-uncased", hidden_dim=768):
@@ -82,33 +77,20 @@ class PrototypicalBertNetwork(torch.nn.Module):
         return torch.stack(prototypes)
 
 
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-def load_clinc_test_data(clinc_path):
-    """Load only test data from CLINC dataset"""
+def load_clinc_test_data(clinc_path, label2id):
+    """Load only test data from CLINC dataset, using label2id from training metadata."""
     with open(clinc_path, "r") as f:
         data = json.load(f)
 
     test_texts = [item[0] for item in data["test"]]
     test_labels = [item[1] for item in data["test"]]
-
-    # Create label mapping (same as training)
-    all_labels = list(set(test_labels))
-    all_labels.sort()
-    label2id = {label: idx for idx, label in enumerate(all_labels)}
-
     test_ids = [label2id[l] for l in test_labels]
 
     print(f"Test: {len(test_texts)} examples")
-    print(f"Number of intents: {len(all_labels)}")
 
-    return test_texts, test_ids, label2id
+    return test_texts, test_ids
 
 
-# ============================================================================
-# NOISE GENERATION (Same as Colab)
-# ============================================================================
 def add_casing_noise(texts):
     """Convert all text to uppercase"""
     return [t.upper() for t in texts]
@@ -168,9 +150,6 @@ def add_abbreviation_noise(texts):
     return results
 
 
-# ============================================================================
-# EVALUATION
-# ============================================================================
 class IntentDataset(Dataset):
     """Same dataset class as training"""
     def __init__(self, texts, labels, tokenizer, max_length=64):
@@ -201,8 +180,9 @@ class IntentDataset(Dataset):
             "label": torch.tensor(label, dtype=torch.long)
         }
 
-def evaluate_model(model, texts, labels, tokenizer, num_classes, device, desc="Evaluating"):
-    """Evaluate model on given texts and labels"""
+
+def evaluate_model(model, texts, labels, tokenizer, prototypes, device):
+    """Evaluate model using pre-built training prototypes."""
     dataset = IntentDataset(texts, labels, tokenizer, MAX_LENGTH)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -214,25 +194,16 @@ def evaluate_model(model, texts, labels, tokenizer, num_classes, device, desc="E
         for batch in loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            batch_labels = batch["label"].to(device)
+            batch_labels = batch["label"]
 
             embeddings = model(input_ids, attention_mask)
-            prototypes = model.compute_prototypes(embeddings, batch_labels, num_classes)
-
-            distances = torch.cdist(embeddings, prototypes)
-            logits = -distances
-
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            distances = torch.cdist(embeddings, prototypes.to(device))
+            preds = torch.argmin(distances, dim=1).cpu().numpy()
             all_preds.extend(preds)
-            all_labels.extend(batch_labels.cpu().numpy())
+            all_labels.extend(batch_labels.numpy())
 
-    accuracy = accuracy_score(all_labels, all_preds)
-    return accuracy
+    return accuracy_score(all_labels, all_preds)
 
-
-# ============================================================================
-# MAIN EVALUATION PIPELINE
-# ============================================================================
 def main():
     print("="*70)
     print("TESTING PROTOTYPICAL NETWORKS ON NOISY CLINC DATA")
@@ -273,15 +244,24 @@ def main():
     # Load tokenizer (trusted source, so weights_only=False is safe)
     tokenizer = torch.load(TOKENIZER_PATH, weights_only=False)
 
-    with open(METADATA_PATH, "r") as f:
-        metadata = json.load(f)
-
-    num_classes = metadata["num_classes"]
+    # Rebuild label2id from training data using the same logic as train_prototypical_bert.py
+    # (sorted unique train labels → indices), matching the mapping used when prototypes.pt was built
+    with open(CLINC_PATH, "r") as f:
+        _data = json.load(f)
+    _train_labels = [item[1] for item in _data["train"]]
+    _all_labels = sorted(set(_train_labels))
+    label2id = {label: idx for idx, label in enumerate(_all_labels)}
+    num_classes = len(label2id)
     print(f"Model loaded - {num_classes} classes")
+
+    print("\nLoading saved prototypes...")
+    prototypes = torch.load(PROTOTYPES_PATH, map_location=DEVICE)
+    print(f"Prototypes loaded — shape: {prototypes.shape}")
 
     # Load test data
     print("\nLoading CLINC test data...")
-    test_texts, test_labels, label2id = load_clinc_test_data(CLINC_PATH)
+    # test_texts, test_labels, label2id = load_clinc_test_data(CLINC_PATH)  # old call, rebuilt label2id from test set
+    test_texts, test_labels = load_clinc_test_data(CLINC_PATH, label2id)
 
     # Generate noisy versions (same as Colab)
     print("\nGenerating noisy test sets...")
@@ -324,7 +304,7 @@ def main():
     results = {}
     for noise_type, texts in noisy_variants.items():
         print(f"\nEvaluating on {noise_type} data...")
-        acc = evaluate_model(model, texts, test_labels, tokenizer, num_classes, DEVICE)
+        acc = evaluate_model(model, texts, test_labels, tokenizer, prototypes, DEVICE)
         results[noise_type] = acc
         print(f"  {noise_type}: {acc:.2f}")
 
@@ -347,10 +327,6 @@ def main():
             print(f"  {noise_type}: {acc:.2f} ({pdr:.1f}%, {erm:.2f})")
     # Save results
     output_results = {
-        "model_info": {
-            "test_accuracy": metadata.get("test_accuracy", "N/A"),
-            "best_val_accuracy": metadata.get("best_val_accuracy", "N/A"),
-        },
         "noise_evaluation": results,
         "degradation_analysis": {
             "baseline_accuracy": clean_acc,

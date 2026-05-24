@@ -13,9 +13,6 @@ from transformers import BertTokenizer, BertModel
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
 CLINC_PATH = "../oos-eval/data/data_full.json"  # Adjust path as needed
 OUTPUT_DIR = "./prototypical_bert_model"
 MAX_LENGTH = 64
@@ -28,9 +25,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 
-# ============================================================================
-# DATA LOADING
-# ============================================================================
 def load_clinc_data(clinc_path):
     """Load CLINC OOS dataset"""
     with open(clinc_path, "r") as f:
@@ -69,9 +63,6 @@ def load_clinc_data(clinc_path):
     )
 
 
-# ============================================================================
-# DATASET CLASS
-# ============================================================================
 class IntentDataset(Dataset):
     """PyTorch dataset for intent classification"""
     def __init__(self, texts, labels, tokenizer, max_length=64):
@@ -103,9 +94,6 @@ class IntentDataset(Dataset):
         }
 
 
-# ============================================================================
-# PROTOTYPICAL NETWORKS MODEL
-# ============================================================================
 class PrototypicalBertNetwork(nn.Module):
     """
     Prototypical Networks with BERT encoder
@@ -157,9 +145,6 @@ class PrototypicalBertNetwork(nn.Module):
         return torch.stack(prototypes)
 
 
-# ============================================================================
-# TRAINING
-# ============================================================================
 def train_epoch(model, train_loader, optimizer, num_classes, device):
     """Train for one epoch"""
     model.train()
@@ -231,9 +216,6 @@ def evaluate(model, eval_loader, num_classes, device):
     return accuracy
 
 
-# ============================================================================
-# MAIN TRAINING PIPELINE
-# ============================================================================
 def main():
     # Create output directory
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
