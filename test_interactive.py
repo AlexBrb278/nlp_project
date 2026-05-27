@@ -285,53 +285,52 @@ canvas.addEventListener('mouseleave', () => { tip.style.display='none'; });
 
 
 def generate_tsne_state(prototypes, id2label, intent2domain, model_dir):
-    """Run t-SNE once and return state dict for reuse when queries arrive."""
+    """Store prototype embeddings; t-SNE is re-run per query in save_tsne_html."""
+    import numpy as np
+    return {
+        "proto_np":      prototypes.cpu().numpy(),
+        "id2label":      id2label,
+        "intent2domain": intent2domain,
+        "title":         f"Prototype Space — {os.path.basename(model_dir)} (t-SNE)",
+    }
+
+
+def save_tsne_html(tsne_state, tsne_queries, tsne_path):
+    """Re-run t-SNE on [prototypes + all query embeddings] and write HTML."""
     from sklearn.manifold import TSNE
     import numpy as np
 
-    proto_np    = prototypes.cpu().numpy()
-    num_classes = proto_np.shape[0]
+    proto_np      = tsne_state["proto_np"]
+    id2label      = tsne_state["id2label"]
+    intent2domain = tsne_state["intent2domain"]
+    n_proto       = proto_np.shape[0]
 
-    print("Running t-SNE on prototypes (perplexity=30, 1000 iterations)…")
-    coords = TSNE(n_components=2, perplexity=30, random_state=42,
-                  max_iter=1000, verbose=0).fit_transform(proto_np)
+    query_embs = [q["emb"] for q in tsne_queries]
+    if query_embs:
+        all_embs = np.vstack([proto_np] + [e.reshape(1, -1) for e in query_embs])
+    else:
+        all_embs = proto_np
+
+    perp   = min(30, all_embs.shape[0] - 1)
+    coords = TSNE(n_components=2, perplexity=perp, random_state=42,
+                  max_iter=1000, verbose=0).fit_transform(all_embs)
 
     points = []
-    for i in range(num_classes):
+    for i in range(n_proto):
         label  = id2label[i]
         domain = intent2domain.get(label, "oos")
         color  = DOMAIN_COLORS.get(domain, "#667788")
         points.append({"x": float(coords[i, 0]), "y": float(coords[i, 1]),
                         "label": label, "domain": domain, "color": color})
 
-    projector = build_tsne_projector(proto_np, coords)
+    query_points = []
+    for j, q in enumerate(tsne_queries):
+        query_points.append({"x": float(coords[n_proto + j, 0]),
+                              "y": float(coords[n_proto + j, 1]),
+                              "text": q["text"], "top_intent": q["top_intent"]})
 
-    return {
-        "proto_np":  proto_np,
-        "coords":    coords,
-        "points":    points,
-        "projector": projector,
-        "title":     f"Prototype Space — {os.path.basename(model_dir)} (t-SNE)",
-    }
-
-
-def build_tsne_projector(proto_np, coords, n_neighbors=15):
-    """Fit a KNN regressor: 768-dim embedding → 2D t-SNE coords."""
-    from sklearn.neighbors import KNeighborsRegressor
-    reg = KNeighborsRegressor(n_neighbors=n_neighbors, weights="distance")
-    reg.fit(proto_np, coords)
-    return reg
-
-
-def project_query(embedding_np, projector):
-    """Project a single query embedding to 2D using the fitted projector."""
-    return projector.predict(embedding_np.reshape(1, -1))[0]
-
-
-def save_tsne_html(tsne_state, query_points, tsne_path):
-    """Re-render t-SNE HTML with current query diamonds and write to disk."""
     html = (TSNE_TEMPLATE
-            .replace("__POINTS__",  json.dumps(tsne_state["points"]))
+            .replace("__POINTS__",  json.dumps(points))
             .replace("__QUERIES__", json.dumps(query_points))
             .replace("__COLORS__",  json.dumps(DOMAIN_COLORS))
             .replace("__TITLE__",   tsne_state["title"]))
@@ -453,6 +452,38 @@ def build_prototypes(embeddings, labels, num_classes):
     return protos
 
 
+def compute_embeddings(model, texts, label_ids, tokenizer, max_length, save_path, batch_size=64):
+    from torch.utils.data import DataLoader, Dataset
+
+    class _DS(Dataset):
+        def __init__(self, texts, labels, tok, ml):
+            self.texts, self.labels, self.tok, self.ml = texts, labels, tok, ml
+        def __len__(self): return len(self.labels)
+        def __getitem__(self, i):
+            enc = self.tok(self.texts[i], add_special_tokens=True,
+                           max_length=self.ml, padding="max_length",
+                           truncation=True, return_tensors="pt")
+            return {"input_ids":      enc["input_ids"].squeeze(0),
+                    "attention_mask": enc["attention_mask"].squeeze(0),
+                    "label":          torch.tensor(self.labels[i], dtype=torch.long)}
+
+    loader = DataLoader(_DS(texts, label_ids, tokenizer, max_length),
+                        batch_size=batch_size, shuffle=False)
+    embs, lbls = [], []
+    model.eval()
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            e = model(batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE))
+            embs.append(e.cpu())
+            lbls.extend(batch["label"].tolist())
+            if (i + 1) % 10 == 0:
+                done = min((i + 1) * batch_size, len(texts))
+                print(f"  {done}/{len(texts)} embedded...")
+    embs = torch.cat(embs)
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    torch.save({"embeddings": embs, "labels": lbls}, save_path)
+    print(f"Embeddings saved -> {save_path}")
+    return embs, lbls
 def load_domains(domains_path):
     with open(domains_path) as f:
         raw = json.load(f)
@@ -485,12 +516,19 @@ def load_model(args, clinc_path):
             os.path.join(args.model_dir, "prototypes.pt"), map_location=DEVICE)
         print(f"Prototypes loaded — shape: {prototypes.shape}")
     else:
-        if not args.embeddings:
-            raise ValueError("--embeddings is required for huggingface format.")
-        saved      = torch.load(args.embeddings, map_location="cpu")
-        prototypes = build_prototypes(
-            saved["embeddings"], saved["labels"], num_classes).to(DEVICE)
-        print(f"Prototypes built from embeddings — shape: {prototypes.shape}")
+        emb_path = args.embeddings or os.path.join(args.model_dir, "train_embeddings.pt")
+        if not os.path.exists(emb_path):
+            print(f"Embeddings not found at {emb_path} — computing from training set…")
+            train_texts  = [item[0] for item in data["train"]]
+            train_ids    = [label2id[item[1]] for item in data["train"]]
+            embs, lbls   = compute_embeddings(
+                model, train_texts, train_ids, tokenizer, args.max_length, emb_path)
+        else:
+            saved      = torch.load(emb_path, map_location="cpu")
+            embs, lbls = saved["embeddings"], saved["labels"]
+            print(f"Embeddings loaded from {emb_path}")
+        prototypes = build_prototypes(embs, lbls, num_classes).to(DEVICE)
+        print(f"Prototypes built — shape: {prototypes.shape}")
 
     print(f"Ready — {num_classes} intents | device: {DEVICE}")
     return model, tokenizer, prototypes, id2label
@@ -629,11 +667,12 @@ def main():
             save_html(history, intent2domain, args.html_path)
 
         if args.tsne:
-            pos = project_query(emb_np, tsne_state["projector"])
-            tsne_queries.append({"x": float(pos[0]), "y": float(pos[1]),
-                                  "text": text, "top_intent": preds[0][0]})
+            tsne_queries.clear()
+            tsne_queries.append({"emb": emb_np, "text": text, "top_intent": preds[0][0]})
+            print("  Re-running t-SNE...")
             save_tsne_html(tsne_state, tsne_queries, args.tsne_path)
 
 
 if __name__ == "__main__":
     main()
+
