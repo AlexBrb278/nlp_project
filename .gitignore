@@ -4,3 +4,8 @@ charLVL_output/
 __pycache__/
 oos-eval/
 prototypical_networks/prototypical_bert_model/
+results/
+proj.sif
+proj.def
+proj.slurm
+logs/
